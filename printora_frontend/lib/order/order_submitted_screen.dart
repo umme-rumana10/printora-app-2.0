@@ -160,7 +160,7 @@ class OrderSubmittedScreen extends StatelessWidget {
                       context,
                       MaterialPageRoute(
                         builder: (_) => OrderTrackingScreen(
-                          orderId: orderId,
+                          jobId: orderId,
                         ),
                       ),
                     );

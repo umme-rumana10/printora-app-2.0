@@ -1,13 +1,9 @@
-import 'dart:convert';
 import 'dart:io';
-
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-
 import '../../models/print_option.dart';
 import '../../services/api_service.dart';
 import '../../state/app_state.dart';
-import '../../order/order_submitted_screen.dart';
+import '../payment/payment_pending_screen.dart';
 
 class PrintSettingsScreen extends StatefulWidget {
   final List<File> files;
@@ -23,118 +19,91 @@ class PrintSettingsScreen extends StatefulWidget {
 
 class _PrintSettingsScreenState extends State<PrintSettingsScreen> {
   late List<PrintOption> options;
-  bool isUploading = false;
+  bool isSubmitting = false;
+  final ApiService _api = ApiService();
 
   @override
   void initState() {
     super.initState();
-
     options = List.generate(
       widget.files.length,
       (index) => PrintOption(),
     );
   }
 
-  double getTotalCost() {
+  double calculateEstimatedCost() {
     double total = 0;
-
-    for (var option in options) {
-      total += option.color ? option.copies * 10 : option.copies * 2;
+    for (var opt in options) {
+      // Estimated 1 page default, updated precisely after backend page count
+      final rate = opt.color ? 10.0 : 2.0;
+      total += opt.copies * rate;
     }
-
     return total;
   }
 
-  Future<void> uploadOrder() async {
+  Future<void> submitAndProceedToPayment() async {
+    if (widget.files.isEmpty) return;
+
+    setState(() {
+      isSubmitting = true;
+    });
+
     try {
-      setState(() {
-        isUploading = true;
-      });
+      final machineId = AppState.resolvedMachineId; // QR-scanned or default 'printer001'
+      final primaryFile = widget.files.first;
+      final primaryOption = options.first;
+      final fileName = primaryFile.path.split(Platform.isWindows ? '\\' : '/').last;
 
-      final formData = FormData();
-
-      // Add files
-      for (final file in widget.files) {
-        formData.files.add(
-          MapEntry(
-            "files",
-            await MultipartFile.fromFile(
-              file.path,
-              filename: file.path.split('/').last,
-            ),
-          ),
-        );
-      }
-
-      // Build settings array
-      final settings = <Map<String, dynamic>>[];
-
-      for (final option in options) {
-        settings.add({
-          "pages": 1,
-          "copies": option.copies,
-          "color": option.color,
-          "pageRange": option.allPages ? "all" : option.pageRange,
-        });
-      }
-
-      formData.fields.add(
-        MapEntry(
-          "settings",
-          jsonEncode(settings),
-        ),
+      // 1. Create Job in backend (State: CREATED)
+      final job = await _api.createJob(
+        machineId: machineId,
+        copies: primaryOption.copies,
+        color: primaryOption.color,
+        duplex: primaryOption.duplex,
       );
 
-      formData.fields.add(
-        MapEntry(
-          "kioskId",
-          AppState.kioskId ?? "",
-        ),
+      // Store job ID globally for easy access
+      AppState.currentJobId = job.id;
+
+      // 2. Upload Document (State: UPLOADED, with verified page count & SHA-256)
+      await _api.uploadJobFile(
+        jobId: job.id,
+        filePath: primaryFile.path,
+        fileName: fileName,
       );
 
-      debugPrint("KIOSK ID: ${AppState.kioskId}");
-      debugPrint("FILES COUNT: ${widget.files.length}");
-      debugPrint("SETTINGS COUNT: ${settings.length}");
-
-      final response = await ApiService().uploadMultipleFiles(
-        formData,
-      );
-
-      debugPrint(response.data.toString());
-
-      final orderId = response.data["orderId"];
-      final totalPrice = response.data["totalPrice"];
+      // 3. Create Payment Session (State: PAYMENT_PENDING)
+      final session = await _api.createPaymentSession(job.id);
+      final orderId = session['orderId'] as String;
+      final amount = (session['amount'] is num) ? (session['amount'] as num).toDouble() : job.amount;
 
       if (!mounted) return;
 
       setState(() {
-        isUploading = false;
+        isSubmitting = false;
       });
 
+      // 4. Navigate to Razorpay Checkout / Payment Pending
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => OrderSubmittedScreen(
+          builder: (_) => PaymentPendingScreen(
+            jobId: job.id,
             orderId: orderId,
-            totalPrice: totalPrice.toDouble(),
+            amount: amount,
           ),
         ),
       );
     } catch (e) {
+      if (!mounted) return;
       setState(() {
-        isUploading = false;
+        isSubmitting = false;
       });
-
-      if (e is DioException) {
-        debugPrint("STATUS CODE: ${e.response?.statusCode}");
-        debugPrint("RESPONSE DATA: ${e.response?.data}");
-      }
-
-      debugPrint(e.toString());
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(e.toString()),
+          content: Text("Error initiating print job: $e"),
+          backgroundColor: Colors.red,
         ),
       );
     }
@@ -151,98 +120,111 @@ class _PrintSettingsScreenState extends State<PrintSettingsScreen> {
         children: [
           Expanded(
             child: ListView.builder(
+              padding: const EdgeInsets.all(16),
               itemCount: widget.files.length,
               itemBuilder: (context, index) {
                 final file = widget.files[index];
                 final option = options[index];
+                final name = file.path.split(Platform.isWindows ? '\\' : '/').last;
 
                 return Card(
-                  margin: const EdgeInsets.all(12),
+                  margin: const EdgeInsets.only(bottom: 16),
                   elevation: 3,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
                   child: Padding(
-                    padding: const EdgeInsets.all(15),
+                    padding: const EdgeInsets.all(18),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          file.path.split('/').last,
+                          name,
                           style: const TextStyle(
                             fontWeight: FontWeight.bold,
-                            fontSize: 18,
+                            fontSize: 17,
                           ),
                         ),
-                        const SizedBox(height: 15),
-                        const Text(
-                          "Copies",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                        const SizedBox(height: 16),
+
+                        // Copies counter
                         Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            IconButton(
-                              onPressed: () {
-                                if (option.copies > 1) {
-                                  setState(() {
-                                    option.copies--;
-                                  });
-                                }
-                              },
-                              icon: const Icon(
-                                Icons.remove_circle,
-                              ),
+                            const Text(
+                              "Number of Copies",
+                              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
                             ),
-                            Text(
-                              "${option.copies}",
-                              style: const TextStyle(
-                                fontSize: 18,
-                              ),
-                            ),
-                            IconButton(
-                              onPressed: () {
-                                setState(() {
-                                  option.copies++;
-                                });
-                              },
-                              icon: const Icon(
-                                Icons.add_circle,
-                              ),
+                            Row(
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.remove_circle_outline, color: Colors.blue),
+                                  onPressed: () {
+                                    if (option.copies > 1) {
+                                      setState(() {
+                                        option.copies--;
+                                      });
+                                    }
+                                  },
+                                ),
+                                Text(
+                                  "${option.copies}",
+                                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.add_circle_outline, color: Colors.blue),
+                                  onPressed: () {
+                                    setState(() {
+                                      option.copies++;
+                                    });
+                                  },
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                        const Divider(),
+                        const Divider(height: 24),
+
+                        // Color / B&W toggle
                         SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
                           title: Text(
-                            option.color ? "Color" : "Black & White",
+                            option.color ? "Color (₹10/page)" : "Black & White (₹2/page)",
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          subtitle: Text(
+                            option.color ? "Premium vibrant color print" : "Standard monochrome print",
+                            style: const TextStyle(fontSize: 12),
                           ),
                           value: option.color,
-                          onChanged: (value) {
+                          activeThumbColor: Colors.orange,
+                          onChanged: (val) {
                             setState(() {
-                              option.color = value;
+                              option.color = val;
                             });
                           },
                         ),
-                        const Divider(),
-                        CheckboxListTile(
+                        const Divider(height: 24),
+
+                        // Duplex toggle
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
                           title: const Text(
-                            "All Pages",
+                            "Duplex (Double-Sided)",
+                            style: TextStyle(fontWeight: FontWeight.w600),
                           ),
-                          value: option.allPages,
-                          onChanged: (value) {
+                          subtitle: const Text(
+                            "Print on both sides of the sheet",
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          value: option.duplex,
+                          activeThumbColor: const Color(0xff2563EB),
+                          onChanged: (val) {
                             setState(() {
-                              option.allPages = value!;
+                              option.duplex = val;
                             });
                           },
                         ),
-                        if (!option.allPages)
-                          TextField(
-                            decoration: const InputDecoration(
-                              hintText: "Example: 1-5",
-                            ),
-                            onChanged: (value) {
-                              option.pageRange = value;
-                            },
-                          ),
                       ],
                     ),
                   ),
@@ -250,47 +232,70 @@ class _PrintSettingsScreenState extends State<PrintSettingsScreen> {
               },
             ),
           ),
+
+          // Bottom Price & Proceed Bar
           Container(
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
-              color: Colors.grey.shade100,
+              color: Colors.white,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black12,
-                  blurRadius: 5,
+                  color: Colors.black.withValues(alpha: 0.08),
+                  blurRadius: 10,
+                  offset: const Offset(0, -3),
                 ),
               ],
             ),
-            child: Column(
-              children: [
-                Text(
-                  "Estimated Cost : ₹${getTotalCost().toStringAsFixed(0)}",
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
+            child: SafeArea(
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        "Estimated Cost:",
+                        style: TextStyle(fontSize: 18, color: Colors.grey),
+                      ),
+                      Text(
+                        "₹${calculateEstimatedCost().toStringAsFixed(0)}",
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xff2563EB),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 15),
-                SizedBox(
-                  width: double.infinity,
-                  height: 55,
-                  child: ElevatedButton(
-                    onPressed: isUploading ? null : uploadOrder,
-                    child: isUploading
-                        ? const SizedBox(
-                            height: 24,
-                            width: 24,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 3,
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 54,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xff2563EB),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      onPressed: isSubmitting ? null : submitAndProceedToPayment,
+                      child: isSubmitting
+                          ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text(
+                              "Proceed to Payment",
+                              style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                             ),
-                          )
-                        : const Text(
-                            "Confirm Print",
-                            style: TextStyle(fontSize: 18),
-                          ),
+                    ),
                   ),
-                )
-              ],
+                ],
+              ),
             ),
           ),
         ],

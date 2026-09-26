@@ -1,28 +1,50 @@
-# Root
+# ============================================================
+# Printora App — .gitignore
+# ============================================================
+
+# ── Node.js ─────────────────────────────────────────────────
 node_modules/
 package-lock.json
+npm-debug.log*
 
-# Environment
+# ── Environment (NEVER commit secrets) ──────────────────────
 .env
 .env.*
+!.env.example
 
-# Logs
-*.log
+# ── TypeScript Build Output ──────────────────────────────────
+printora-backend/dist/
+printora-backend/uploads/
 
-# VS Code
-.vscode/
-
-# Flutter
+# ── Flutter ──────────────────────────────────────────────────
 printora_frontend/build/
 printora_frontend/.dart_tool/
+printora_frontend/.flutter-plugins
+printora_frontend/.flutter-plugins-dependencies
+printora_frontend/.packages
+printora_frontend/pubspec.lock
+printora_frontend/android/.gradle/
+printora_frontend/android/local.properties
+printora_frontend/android/app/debug/
+printora_frontend/android/app/release/
+printora_frontend/ios/Pods/
+printora_frontend/ios/.symlinks/
+printora_frontend/ios/Runner.xcworkspace/xcuserdata/
+printora_frontend/linux/flutter/
+printora_frontend/macos/Flutter/
+printora_frontend/windows/flutter/
 
-# Backend
-printora-backend/node_modules/
-printora-backend/.env
+# ── Simulators Runtime Output ────────────────────────────────
+simulators/printed_jobs/*.pdf
+simulators/pi-agent/downloads/
 
-# Kiosk Agent
-printora-kiosk-agent/node_modules/
-printora-kiosk-agent/.env
+# ── Logs ────────────────────────────────────────────────────
+*.log
+logs/
 
-# Downloads
-printora-kiosk-agent/downloads/
+# ── OS / Editor ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
